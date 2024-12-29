@@ -5,7 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
+#include <time.h>
 
+#define MAX_EVENTS 16
 #define SSLCERT_PATH "/etc/letsencrypt/live/zybooks.eliasmurcray.me/fullchain.pem"
 #define SSLKEY_PATH "/etc/letsencrypt/live/zybooks.eliasmurcray.me/privkey.pem"
 
@@ -15,6 +19,7 @@ void handle_connection(SSL *ssl, struct sockaddr_in *client_addr) {
   for (;;) {
     ssize_t bytes_read = SSL_read(ssl, buffer, sizeof(buffer) - 1);
     if (bytes_read < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
       perror("read");
       return;
     }
@@ -32,13 +37,6 @@ void handle_connection(SSL *ssl, struct sockaddr_in *client_addr) {
     request[total_bytes] = '\0';
     if (strstr(request, "\r\n\r\n")) break;
   }
-  printf("%s\n", request);
-  char client_ip[INET_ADDRSTRLEN];
-  if (inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, INET_ADDRSTRLEN) == NULL) {
-    perror("inet_ntop");
-    free(request);
-    return;
-  }
   char *method = NULL, *path = NULL;
   if (request && strstr(request, "\r\n\r\n")) {
     method = strtok(request, " ");
@@ -48,19 +46,53 @@ void handle_connection(SSL *ssl, struct sockaddr_in *client_addr) {
       return;
     }
   }
-  printf("%s %s %s\n", method, path, client_ip);
-  /*if (strcmp(method, "POST") != 0) {
+  char client_ip[INET_ADDRSTRLEN];
+  if (inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, INET_ADDRSTRLEN) == NULL) {
+    perror("inet_ntop");
     free(request);
     return;
-  }*/
+  }
+  time_t now;
+  time(&now);
+  struct tm *tm_info = localtime(&now);
+  char timestamp[20];
+  strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S", tm_info);
+  const char *log_entry_fmt = "[%s] %s %s %s\n";
+  size_t log_entry_length = snprintf(NULL, 0, log_entry_fmt, timestamp, method, path, client_ip);
+  char *log_entry = malloc(log_entry_length + 1);
+  if (snprintf(log_entry, log_entry_length, log_entry_fmt, timestamp, method, path, client_ip) < 0) {
+    perror("snprintf");
+    free(request);
+    return;
+  }
   free(request);
-  const char *response =
+  log_entry[log_entry_length] = '\0';
+  printf("%s\n", log_entry);
+  const char *response_fmt =
     "HTTP/1.1 200 OK\r\n"
     "Content-Type: text/plain\r\n"
-    "Content-Length: 11\r\n"
+    "Content-Length: %zu\r\n"
     "\r\n"
-    "Hello world";
-  SSL_write(ssl, response, strlen(response));
+    "%s";
+  size_t response_length = snprintf(NULL, 0, response_fmt, log_entry_length - 2, log_entry);
+  char *response = malloc(response_length + 1);
+  if (snprintf(response, response_length, response_fmt, log_entry_length - 2, log_entry) < 0) {
+    perror("snprintf");
+    free(log_entry);
+    return;
+  }
+  /* TODO: Add retries for writes */
+  if (SSL_write(ssl, response, strlen(response)) < 0) {
+    perror("SSL_write");
+  }
+  free(log_entry);
+  free(response);
+}
+
+int set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1) return -1;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 int main() {
@@ -87,6 +119,10 @@ int main() {
     perror("setsockopt");
     return 1;
   }
+  if (set_nonblocking(server_fd) < 0) {
+    perror("set_nonblocking server");
+    return 1;
+  }
   struct sockaddr_in addr = {
     .sin_family = AF_INET,
     .sin_port = htons(443),
@@ -96,30 +132,59 @@ int main() {
     close(server_fd);
     return 1;
   }
-  if (listen(server_fd, 1) < 0) {
+  if (listen(server_fd, SOMAXCONN) < 0) {
     perror("listen");
     close(server_fd);
     return 1;
   }
   printf("Listening on port 443...\n");
-  while (1) {
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-    if (client_fd < 0) {
-      perror("accept");
-      continue;
-    }
-    SSL *ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, client_fd);
-    if (SSL_accept(ssl) <= 0) {
-      ERR_print_errors_fp(stderr);
-    } else {
+  int epoll_fd = epoll_create1(0);
+  if (epoll_fd == -1) {
+    perror("epoll_create1");
+    close(server_fd);
+    return 1;
+  }
+  struct epoll_event event, events[MAX_EVENTS];
+  event.events = EPOLLIN;
+  event.data.fd = server_fd;
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
+    perror("epoll_ctl");
+    close(server_fd);
+    return 1;
+  }
+  for (;;) {
+    int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1), i = 0;
+    for (; i < n; i ++) {
+      if (events[i].data.fd != server_fd) continue;
+      struct sockaddr_in client_addr;
+      socklen_t client_len = sizeof(client_addr);
+      int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+      if (client_fd < 0) {
+        perror("accept");
+        continue;
+      }
+      SSL *ssl = SSL_new(ctx);
+      SSL_set_fd(ssl, client_fd);
+      if (SSL_accept(ssl) <= 0) {
+        perror("SSL_accept");
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        continue;
+      }
+      if (set_nonblocking(client_fd) < 0) {
+        perror("set_nonblocking client");
+        close(client_fd);
+        SSL_free(ssl);
+        continue;
+      }
+      struct epoll_event client_event;
+      client_event.events = EPOLLIN | EPOLLET;
+      client_event.data.fd = client_fd;
+      epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event);
       handle_connection(ssl, &client_addr);
+      SSL_free(ssl);
+      close(client_fd);
     }
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    close(client_fd);
   }
   close(server_fd);
 }

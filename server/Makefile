@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -std=c89 -Ofast -Wall -Wextra -g
+CFLAGS = -std=c99 -Ofast -Wall -Wextra -g
 LIBS = `pkg-config openssl --cflags --libs`
 TARGET = build/server
 SRCS = $(wildcard src/**.c)

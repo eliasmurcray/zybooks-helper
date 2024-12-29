@@ -1,13 +1,13 @@
-#include <openssl/ssl.h>
-#include <openssl/err.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/epoll.h>
-#include <fcntl.h>
 #include <time.h>
+#include <unistd.h>
 
 #define MAX_EVENTS 16
 #define SSLCERT_PATH "/etc/letsencrypt/live/zybooks.eliasmurcray.me/fullchain.pem"
@@ -69,11 +69,11 @@ void handle_connection(SSL *ssl, struct sockaddr_in *client_addr) {
   log_entry[log_entry_length] = '\0';
   printf("%s\n", log_entry);
   const char *response_fmt =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: %zu\r\n"
-    "\r\n"
-    "%s";
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: %zu\r\n"
+      "\r\n"
+      "%s";
   size_t response_length = snprintf(NULL, 0, response_fmt, log_entry_length - 2, log_entry);
   char *response = malloc(response_length + 1);
   if (snprintf(response, response_length, response_fmt, log_entry_length - 2, log_entry) < 0) {
@@ -124,9 +124,9 @@ int main() {
     return 1;
   }
   struct sockaddr_in addr = {
-    .sin_family = AF_INET,
-    .sin_port = htons(443),
-    .sin_addr.s_addr = INADDR_ANY};
+      .sin_family = AF_INET,
+      .sin_port = htons(443),
+      .sin_addr.s_addr = INADDR_ANY};
   if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     perror("bind");
     close(server_fd);
@@ -154,7 +154,7 @@ int main() {
   }
   for (;;) {
     int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1), i = 0;
-    for (; i < n; i ++) {
+    for (; i < n; i++) {
       if (events[i].data.fd != server_fd) continue;
       struct sockaddr_in client_addr;
       socklen_t client_len = sizeof(client_addr);

@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-void handle_connection(int client_fd) {
+void handle_connection(int client_fd, struct sockaddr_in *client_addr) {
   char buffer[1024];
   size_t total_bytes = 0;
   char *request = NULL;
@@ -17,6 +17,7 @@ void handle_connection(int client_fd) {
     if (!new_request) {
       perror("realloc");
       free(request);
+      goto internal_server_error;
       return;
     }
     request = new_request;
@@ -27,8 +28,25 @@ void handle_connection(int client_fd) {
       break;
     }
   }
-  if (request) {
-    printf("%s\n", request);
+  char client_ip[INET_ADDRSTRLEN];
+  if (inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, INET_ADDRSTRLEN) == NULL) {
+    perror("inet_ntop");
+    free(request);
+    goto internal_server_error;
+  }
+  char *method = NULL, *path = NULL;
+  if (request && strstr(request, "\r\n\r\n")) {
+    method = strtok(request, " ");
+    path = strtok(NULL, " ");
+    if (!method || !path) {
+      free(request);
+      goto internal_server_error;
+    }
+  }
+  printf("%s %s %s\n", method, path, client_ip);
+  if (strcmp(method, "POST") != 0) {
+    free(request);
+    goto internal_server_error;
   }
   free(request);
   const char *response =
@@ -38,6 +56,16 @@ void handle_connection(int client_fd) {
       "\r\n"
       "{\"foo\":\"bar\"}";
   write(client_fd, response, strlen(response));
+  return;
+internal_server_error: {
+  const char *response =
+      "HTTP/1.1 404 Not Found\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: 0\r\n"
+      "\r\n";
+  write(client_fd, response, strlen(response));
+  return;
+}
 }
 
 int main() {
@@ -51,10 +79,10 @@ int main() {
     perror("setsockopt");
     return 1;
   }
-  struct sockaddr_in addr;
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(3000);
-  addr.sin_addr.s_addr = INADDR_ANY;
+  struct sockaddr_in addr = {
+      .sin_family = AF_INET,
+      .sin_port = htons(3000),
+      .sin_addr.s_addr = INADDR_ANY};
   if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     perror("bind");
     close(server_fd);
@@ -74,7 +102,7 @@ int main() {
       perror("accept");
       continue;
     }
-    handle_connection(client_fd);
+    handle_connection(client_fd, &client_addr);
     close(client_fd);
   }
   close(server_fd);

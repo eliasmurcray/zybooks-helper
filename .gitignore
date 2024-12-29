@@ -1,6 +1,3 @@
-# Secrets
-certs/
-
 # Build
 server/build/
 
